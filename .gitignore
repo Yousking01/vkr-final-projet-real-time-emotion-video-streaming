@@ -205,3 +205,25 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Data & outputs (do not version large/generated files)
+data/**
+models/**
+*.parquet
+*.crc
+
+# Spark checkpoints (generated)
+**/checkpoints/**
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.env
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
