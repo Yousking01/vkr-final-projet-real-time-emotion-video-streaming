@@ -1,0 +1,191 @@
+D’accord 🙂 Repose-toi.
+
+Pour que **demain tu reprennes sans galère**, fais juste ces 3 choses rapides (2 minutes) :
+
+## 1) Sauvegarder ton travail (app.py)
+
+Dans ton projet Windows (Final_project), assure-toi que ton `src/dashboard/app.py` est bien enregistré.
+
+## 2) Commit + push (recommandé)
+
+Dans **Git Bash** (dans le dossier du projet) :
+
+```bash
+git status
+git add src/dashboard/app.py
+git commit -m "Fix dashboard: robust timestamp handling + no KeyError"
+git push
+```
+
+> Si tu vois d’autres fichiers modifiés et tu ne veux pas les envoyer maintenant, ajoute **seulement** `app.py` comme ci-dessus.
+
+## 3) Tout arrêter proprement (Docker + Streamlit)
+
+* Si Streamlit tourne dans un terminal : **Ctrl + C**
+* Puis arrête les conteneurs :
+
+```bash
+docker compose down
+```
+
+(ou `docker-compose down` selon ta version)
+
+---
+
+## Demain, pour reprendre
+
+1. Ouvre le projet
+2. Relance Docker :
+
+```bash
+docker compose up -d
+```
+
+3. Relance Streamlit :
+
+```bash
+streamlit run src/dashboard/app.py
+```
+
+---
+
+Si tu veux, quand tu reviens demain, dis-moi juste : **“je suis prêt, on continue”** et on reprendra exactement à l’étape Spark → Parquet_events_v2 avec `event_time/event_ts` corrects.
+
+
+
+0) Vérifie que tes conteneurs tournent
+
+Dans Final_project :
+
+docker ps --format "table {{.Names}}\t{{.Status}}"
+
+
+Tu dois voir au moins :
+
+final_project-spark-master-1
+
+final_project-spark-worker-1
+
+final_project-kafka-1
+
+final_project-zookeeper-1
+
+1) Stop l’ancien spark-submit (Ctrl+C)
+
+Va dans le terminal où spark-submit est en train de tourner
+
+Appuie Ctrl + C une fois
+
+Attends que tu reviennes au prompt (ça doit arrêter le job)
+
+✅ Option “propre” : vérifier qu’il n’y a plus d’applications Spark RUNNING
+Ouvre http://localhost:8080 (Spark UI). Tu ne dois plus voir ton job en “RUNNING”.
+
+2) Nettoyage parquet + checkpoint (host + container)
+
+Tu l’as déjà fait, mais je te donne la version complète “safe”.
+
+2.1 Côté Windows (dossier local)
+
+Toujours dans Final_project :
+
+rmdir /s /q data\parquet_events_v2
+rmdir /s /q data\checkpoints\parquet_events_v2
+mkdir data\parquet_events_v2
+mkdir data\checkpoints\parquet_events_v2
+
+2.2 Côté conteneur Spark (dossier /opt/project_data)
+docker exec -it final_project-spark-master-1 bash -lc "rm -rf /opt/project_data/parquet_events_v2 /opt/project_data/checkpoints/parquet_events_v2 && mkdir -p /opt/project_data/parquet_events_v2 /opt/project_data/checkpoints/parquet_events_v2"
+
+3) Assure-toi que ton script dans le container est bien le dernier (optionnel mais recommandé)
+
+Depuis Windows, copie ton script corrigé vers le container :
+
+docker cp src\streaming\spark_kafka_json_to_parquet_v2.py final_project-spark-master-1:/opt/spark/work-dir/spark_kafka_json_to_parquet_v2.py
+
+
+Vérifie startingOffsets :
+
+docker exec -it final_project-spark-master-1 bash -lc "grep -n \"startingOffsets\" /opt/spark/work-dir/spark_kafka_json_to_parquet_v2.py"
+
+
+Tu dois voir :
+startingOffsets", "latest"
+
+4) Relance Spark submit (la commande)
+
+Lance ça depuis Windows :
+
+docker exec -it final_project-spark-master-1 /opt/spark/bin/spark-submit ^
+  --conf spark.jars.ivy=/tmp/ivy ^
+  --master spark://spark-master:7077 ^
+  --conf spark.cores.max=4 ^
+  --conf spark.executor.cores=2 ^
+  --conf spark.executor.instances=2 ^
+  --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.3 ^
+  /opt/spark/work-dir/spark_kafka_json_to_parquet_v2.py
+
+
+✅ Laisse ce terminal ouvert (le job tourne en continu).
+
+5) Envoie 5 messages dans Kafka (simple et sûr)
+Option A (interactive, la plus simple)
+
+Dans un autre terminal :
+
+docker exec -it final_project-kafka-1 bash -lc "kafka-console-producer --broker-list kafka:29092 --topic test_topic"
+
+
+Colle ensuite 5 lignes JSON (1 ligne = 1 message), puis appuie Enter après chaque :
+
+{"source_id":"cam_01","frame_id":901,"face_id":1,"producer_ts":1770943000.1,"emotion":"happy","score":0.91,"bbox_x":10,"bbox_y":20,"bbox_w":100,"bbox_h":120}
+{"source_id":"cam_01","frame_id":902,"face_id":1,"producer_ts":1770943000.2,"emotion":"sad","score":0.81,"bbox_x":12,"bbox_y":22,"bbox_w":98,"bbox_h":118}
+{"source_id":"cam_01","frame_id":903,"face_id":1,"producer_ts":1770943000.3,"emotion":"angry","score":0.71,"bbox_x":14,"bbox_y":24,"bbox_w":96,"bbox_h":116}
+{"source_id":"cam_01","frame_id":904,"face_id":1,"producer_ts":1770943000.4,"emotion":"neutral","score":0.66,"bbox_x":16,"bbox_y":26,"bbox_w":94,"bbox_h":114}
+{"source_id":"cam_01","frame_id":905,"face_id":1,"producer_ts":1770943000.5,"emotion":"surprise","score":0.77,"bbox_x":18,"bbox_y":28,"bbox_w":92,"bbox_h":112}
+
+
+⚠️ IMPORTANT : Ici producer_ts est “fixe” (ancien) → latence sera grande.
+✅ Donc on doit envoyer avec producer_ts = time.time() (maintenant).
+
+Option B (recommandée) : produire 5 messages avec l’heure actuelle (automatique)
+
+Dans Windows (un terminal) :
+
+python -c "import time, json, subprocess; 
+msgs=[]; 
+pairs=[('happy',0.91),('sad',0.81),('angry',0.71),('neutral',0.66),('surprise',0.77)];
+i=901;
+for emo,sc in pairs:
+    msg={'source_id':'cam_01','frame_id':i,'face_id':1,'producer_ts':time.time(),'emotion':emo,'score':sc,'bbox_x':10+i%5,'bbox_y':20+i%5,'bbox_w':100,'bbox_h':120};
+    msgs.append(json.dumps(msg));
+    i+=1;
+data='\\n'.join(msgs)+'\\n';
+subprocess.run(['docker','exec','-i','final_project-kafka-1','bash','-lc','kafka-console-producer --broker-list kafka:29092 --topic test_topic'], input=data.encode('utf-8'))"
+
+
+✅ Ça envoie 5 messages avec producer_ts correct (maintenant).
+
+6) Vérification (après 5 messages)
+
+Attends 5–10 secondes (trigger 5 seconds), puis :
+
+python -c "import pandas as pd; df=pd.read_parquet('data/parquet_events_v2'); print('rows=',len(df)); print(df[['event_ts','producer_ts','e2e_latency_ms','emotion']].tail(20))"
+
+Ce que tu dois voir
+
+rows augmente (>= 5)
+
+e2e_latency_ms positif et petit (souvent 0 à quelques milliers de ms)
+
+Si tu vois encore une latence énorme (millions) ou négative
+
+Colle-moi la sortie de :
+
+python -c "import pandas as pd; df=pd.read_parquet('data/parquet_events_v2'); print(df[['event_ts','producer_ts','e2e_latency_ms','spark_ts','emotion']].tail(10))"
+
+
+et je te dis exactement quoi corriger (ça sera soit producer_ts pas “maintenant”, soit l’ancienne data encore mélangée).
+
+
+python send_kafka.py --n 30

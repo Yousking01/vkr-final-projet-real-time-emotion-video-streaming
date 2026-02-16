@@ -64,20 +64,28 @@ I18N = {
 # ---------------------------
 @st.cache_data(ttl=2)
 def load_parquet_folder(path: str) -> pd.DataFrame:
-    if not os.path.exists(path):
+    """
+    Load a parquet folder (Spark output directory) as a pandas DataFrame.
+    Works on Windows for a directory path like: data/parquet_events_v2
+    """
+    if not path or not os.path.exists(path):
         return pd.DataFrame()
 
+    # pandas can read parquet *directory* (dataset) if engine supports it
     try:
         df = pd.read_parquet(path)
+        return df
     except Exception:
-        import pyarrow.dataset as ds
-        dataset = ds.dataset(path, format="parquet")
-        df = dataset.to_table().to_pandas()
+        # fallback: use pyarrow.dataset
+        try:
+            import pyarrow.dataset as ds
+            dataset = ds.dataset(path, format="parquet")
+            return dataset.to_table().to_pandas()
+        except Exception:
+            return pd.DataFrame()
 
-    return df
 
-
-def percentile_safe(series: pd.Series, q: float):
+def percentile_safe(series: pd.Series, q: float) -> float:
     series = pd.to_numeric(series, errors="coerce").dropna()
     if len(series) == 0:
         return np.nan
@@ -87,27 +95,21 @@ def percentile_safe(series: pd.Series, q: float):
 def ensure_datetime(df: pd.DataFrame, colname: str) -> None:
     """Convert df[colname] to datetime safely in-place."""
     if colname in df.columns:
-        df[colname] = pd.to_datetime(df[colname], errors="coerce")
+        df[colname] = pd.to_datetime(df[colname], errors="coerce", utc=False)
 
 
 def pick_timestamp_column(df: pd.DataFrame):
     """
-    Pick the best available timestamp column.
-    Supports both old/new naming:
-    event_ts, spark_ts, event_time, etc.
+    Pick the best available timestamp column, robustly.
+    Priority: event_ts > spark_ts > event_time_dt > event_time
     Returns chosen column name OR None.
     """
-    # Candidates in priority order
-    candidates = [
-        "event_ts",
-        "spark_ts",
-        "event_time",      # your parquet_events_v2 currently has this
-        "event_time_dt",   # optional derived
-    ]
+    candidates = ["event_ts", "spark_ts", "event_time_dt", "event_time"]
 
     for c in candidates:
         if c in df.columns:
-            # if exists but all null -> not usable
+            # force datetime coercion so we don't pick a bad string column
+            df[c] = pd.to_datetime(df[c], errors="coerce", utc=False)
             if not df[c].isna().all():
                 return c
     return None
@@ -118,6 +120,7 @@ def pick_timestamp_column(df: pd.DataFrame):
 # ---------------------------
 st.set_page_config(page_title="Emotion Dashboard", layout="wide")
 
+# Sidebar controls
 lang = st.sidebar.selectbox("Language / Язык", ["en", "ru"], index=0)
 t = I18N[lang]
 
@@ -127,37 +130,70 @@ st.sidebar.header(t["sidebar_title"])
 default_path = "data/parquet_events_v2"
 parquet_path = st.sidebar.text_input(t["data_path"], value=default_path)
 
-min_minutes = st.sidebar.number_input(t["time_filter"], min_value=1, max_value=1440, value=60, step=5)
-min_score = st.sidebar.slider(t["min_score"], min_value=0.0, max_value=1.0, value=0.0, step=0.05)
+min_minutes = st.sidebar.number_input(
+    t["time_filter"], min_value=1, max_value=1440, value=60, step=5
+)
+min_score = st.sidebar.slider(
+    t["min_score"], min_value=0.0, max_value=1.0, value=0.0, step=0.05
+)
 
 refresh_now = st.sidebar.button(t["refresh"])
-auto_refresh_s = st.sidebar.number_input(t["auto_refresh"], min_value=0, max_value=60, value=0, step=1)
+auto_refresh_s = st.sidebar.number_input(
+    t["auto_refresh"], min_value=0, max_value=60, value=0, step=1
+)
 st.sidebar.caption(t["note"])
 
-if auto_refresh_s and auto_refresh_s > 0:
+# Auto refresh
+if auto_refresh_s and int(auto_refresh_s) > 0:
     st.autorefresh(interval=int(auto_refresh_s) * 1000, key="auto_refresh_key")
 
+# Load data
 df = load_parquet_folder(parquet_path)
 
 if df.empty:
     st.warning(t["no_data"])
     st.stop()
 
-# ---------------------------
-# 4) Timestamps: normalize
-# ---------------------------
-# Convert known time columns to datetime if present
+# ---- Timestamp normalization (do it early, before filtering/sorting) ----
 ensure_datetime(df, "event_ts")
 ensure_datetime(df, "spark_ts")
 ensure_datetime(df, "event_time")
 
-# If event_time exists but may be string/None, create event_time_dt for safer handling
+# Safer derived column for event_time (sometimes string/None)
 if "event_time" in df.columns:
-    df["event_time_dt"] = pd.to_datetime(df["event_time"], errors="coerce")
+    df["event_time_dt"] = pd.to_datetime(df["event_time"], errors="coerce", utc=False)
 
 ts_base = pick_timestamp_column(df)
 
-# Filter by time window if possible
+# If no timestamp exists, we still continue but warn
+if ts_base is None:
+    # Make sure your I18N has this key; otherwise replace with st.info("...")
+    st.info(t.get("no_ts_found", "No usable timestamp column found (event_ts/spark_ts/event_time)."))
+
+# ---------------------------
+# 4) Timestamps: normalize
+# ---------------------------
+
+# 1) Convert known time columns to datetime if present
+ensure_datetime(df, "event_ts")
+ensure_datetime(df, "spark_ts")
+ensure_datetime(df, "event_time")
+
+# 2) If event_time exists, create event_time_dt (safe column for display)
+if "event_time" in df.columns:
+    df["event_time_dt"] = pd.to_datetime(df["event_time"], errors="coerce")
+
+# 3) Pick base timestamp column
+ts_base = pick_timestamp_column(df)
+
+# 4) If ts_base exists but is all NaT, fallback properly
+if ts_base is not None:
+    # Ensure it's datetime again (in case pick_timestamp_column returns something unexpected)
+    df[ts_base] = pd.to_datetime(df[ts_base], errors="coerce")
+    if df[ts_base].isna().all():
+        ts_base = None
+
+# 5) Filter by time window if possible
 if ts_base is not None:
     now_ts = df[ts_base].max()
     if pd.notna(now_ts):
@@ -173,7 +209,7 @@ if "score" in df.columns:
 # Source filter
 source_col = "source_id" if "source_id" in df.columns else None
 if source_col:
-    sources = sorted([s for s in df[source_col].dropna().unique().tolist()])
+    sources = sorted(df[source_col].dropna().unique().tolist())
     selected = st.sidebar.selectbox(t["source_filter"], ["ALL"] + sources, index=0)
     if selected != "ALL":
         df = df[df[source_col] == selected]
@@ -190,7 +226,6 @@ kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
 
 lat_p50 = percentile_safe(df.get("e2e_latency_ms", pd.Series(dtype=float)), 50)
 lat_p95 = percentile_safe(df.get("e2e_latency_ms", pd.Series(dtype=float)), 95)
-
 proc_p50 = percentile_safe(df.get("processing_time_ms", pd.Series(dtype=float)), 50)
 proc_p95 = percentile_safe(df.get("processing_time_ms", pd.Series(dtype=float)), 95)
 
@@ -210,8 +245,6 @@ left, right = st.columns([1.2, 1])
 with left:
     st.subheader(t["latest_events"])
 
-    # Prefer showing whichever timestamp column exists
-    # We'll include multiple options; only those present are shown
     cols = [
         "event_ts", "spark_ts", "event_time_dt", "event_time",
         "source_id", "frame_id", "face_id",
@@ -221,7 +254,7 @@ with left:
     ]
     visible_cols = [c for c in cols if c in df.columns]
 
-    # Safe sorting
+    # Safe sorting: if no usable ts_base => just show as-is
     if ts_base is not None and ts_base in df.columns and not df[ts_base].isna().all():
         df_view = df.sort_values(ts_base, ascending=False)
     else:
@@ -240,21 +273,30 @@ with right:
 
 st.divider()
 
-# Timeline
+# ---------------------------
+# 7) Timeline
+# ---------------------------
 st.subheader(t["timeline"])
-if ts_base is not None and "emotion" in df.columns:
-    tmp = df[[ts_base, "emotion"]].dropna().copy()
 
-    # If timestamp is not datetime (should be), try coercion once
-    tmp[ts_base] = pd.to_datetime(tmp[ts_base], errors="coerce")
-    tmp = tmp.dropna(subset=[ts_base])
+# For timeline, prefer event_ts -> spark_ts -> event_time_dt -> event_time
+timeline_ts = None
+for c in ["event_ts", "spark_ts", "event_time_dt", "event_time"]:
+    if c in df.columns:
+        timeline_ts = c
+        break
+
+if timeline_ts is not None and "emotion" in df.columns:
+    tmp = df[[timeline_ts, "emotion"]].copy()
+    tmp[timeline_ts] = pd.to_datetime(tmp[timeline_ts], errors="coerce")
+    tmp = tmp.dropna(subset=[timeline_ts])
 
     if tmp.empty:
         st.info(t["timeline_needs"])
     else:
-        tmp["minute"] = tmp[ts_base].dt.floor("min")
+        tmp["minute"] = tmp[timeline_ts].dt.floor("min")
         timeline = tmp.groupby(["minute", "emotion"]).size().reset_index(name="count")
         pivot = timeline.pivot(index="minute", columns="emotion", values="count").fillna(0).sort_index()
         st.line_chart(pivot)
 else:
     st.info(t["timeline_needs"])
+
