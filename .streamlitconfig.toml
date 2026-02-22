@@ -1,0 +1,5 @@
+[server]
+enableCORS = false
+enableXsrfProtection = false
+address = "localhost"
+port = 8501
