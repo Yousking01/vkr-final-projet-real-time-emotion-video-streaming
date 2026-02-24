@@ -28,13 +28,19 @@ services:
       - "7077:7077"
     volumes:
       - ./data:/opt/project_data
+      - ./spark_jobs:/opt/spark/work-dir
+      # - ./data:/opt/project_data
 
 
   spark-worker:
     image: apache/spark:3.5.3
     command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
+    ports:
+      - "8081:8081"
     depends_on:
       - spark-master
     volumes:
       - ./data:/opt/project_data
+      - ./spark_jobs:/opt/spark/work-dir
+    
 
