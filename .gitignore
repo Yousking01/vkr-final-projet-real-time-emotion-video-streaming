@@ -227,3 +227,12 @@ __pycache__/
 # OS
 .DS_Store
 Thumbs.db
+
+# models / artifacts (big)
+artifacts_vit_emotions_8cls/
+models/*.onnx
+models/*.pth
+models/*.pt
+*.onnx
+*.pth
+*.pt
